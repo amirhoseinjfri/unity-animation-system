@@ -18,7 +18,6 @@ public class AnimationController : MonoBehaviour
     [Tooltip("Default fade duration used when queuing a new looping animation that might be returned to later.")]
     [SerializeField] private float defaultLoopFadeInDuration = 0.2f;
 
-    // --- Caches for Performance ---
     private static readonly Dictionary<string, int> StateHashCache = new Dictionary<string, int>(StringComparer.Ordinal);
     private static readonly Dictionary<string, int> ParamHashCache = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -33,7 +32,6 @@ public class AnimationController : MonoBehaviour
         public Action OnComplete;
     }
 
-    // --- State management per layer ---
     private readonly Dictionary<int, LinkedList<AnimationRequest>> _layerQueues = new Dictionary<int, LinkedList<AnimationRequest>>();
     private readonly Dictionary<int, Coroutine> _layerPlaybackCoroutines = new Dictionary<int, Coroutine>();
     private readonly Dictionary<int, Coroutine> _layerFadeOutCoroutines = new Dictionary<int, Coroutine>();
@@ -57,7 +55,6 @@ public class AnimationController : MonoBehaviour
             if (coroutine != null) StopCoroutine(coroutine);
         }
 
-        // Clear all state-tracking collections for a clean state on re-enable.
         _layerPlaybackCoroutines.Clear();
         _layerFadeOutCoroutines.Clear();
         _layerQueues.Clear();
@@ -79,17 +76,14 @@ public class AnimationController : MonoBehaviour
         if (IsLayerLocked(layer))
             return;
 
-        // Stop any currently running playback coroutine for this layer.
         if (_layerPlaybackCoroutines.TryGetValue(layer, out var coro))
         {
-            StopCoroutine(coro);
+            if (coro != null) StopCoroutine(coro);
             _layerPlaybackCoroutines.Remove(layer);
         }
 
-        // Clear the queue of any pending animations.
         GetOrCreateQueue(layer).Clear();
 
-        // Now, queue this new request and ensure it starts immediately.
         Queue(stateName, layer, fadeDuration, loop, returnToPrevious, lockLayer, onComplete);
     }
 
@@ -118,7 +112,7 @@ public class AnimationController : MonoBehaviour
 
         if (_layerPlaybackCoroutines.TryGetValue(layer, out var coro))
         {
-            StopCoroutine(coro);
+            if (coro != null) StopCoroutine(coro);
             _layerPlaybackCoroutines.Remove(layer);
         }
 
@@ -134,7 +128,6 @@ public class AnimationController : MonoBehaviour
             _animator.SetLayerWeight(layer, 0f);
     }
 
-    // Cached parameter setters for blend trees, etc.
     public void SetFloat(string param, float value) => _animator.SetFloat(GetParamHash(param), value);
     public void SetBool(string param, bool value) => _animator.SetBool(GetParamHash(param), value);
     public void SetInt(string param, int value) => _animator.SetInteger(GetParamHash(param), value);
@@ -157,7 +150,7 @@ public class AnimationController : MonoBehaviour
 
         if (_layerFadeOutCoroutines.TryGetValue(layer, out var fadeCoro))
         {
-            StopCoroutine(fadeCoro);
+            if (fadeCoro != null) StopCoroutine(fadeCoro);
             _layerFadeOutCoroutines.Remove(layer);
         }
 
@@ -165,6 +158,11 @@ public class AnimationController : MonoBehaviour
         _animator.CrossFadeInFixedTime(req.StateHash, req.FadeDuration, layer, 0f);
         if (req.FadeDuration > 0)
             yield return new WaitForSeconds(req.FadeDuration);
+
+        if (!isActiveAndEnabled)
+        {
+            yield break;
+        }
 
         if (req.Loop)
         {
@@ -188,8 +186,14 @@ public class AnimationController : MonoBehaviour
         float timer = 0f;
         while (timer < clipLength - req.FadeDuration)
         {
+            if (!isActiveAndEnabled)
+            {
+                if (req.LockLayer) _lockedLayers.Remove(layer);
+                yield break;
+            }
+
             if (!_animator.IsInTransition(layer) &&
-                _animator.GetCurrentAnimatorStateInfo(layer).shortNameHash != req.StateHash)
+                            _animator.GetCurrentAnimatorStateInfo(layer).shortNameHash != req.StateHash)
             {
                 if (req.LockLayer) _lockedLayers.Remove(layer);
                 _layerPlaybackCoroutines.Remove(layer);
@@ -208,7 +212,10 @@ public class AnimationController : MonoBehaviour
         }
         else if (GetOrCreateQueue(layer).Count == 0)
         {
-            _layerFadeOutCoroutines[layer] = StartCoroutine(FadeOutLayerRoutine(layer, 0.2f));
+            if (this.isActiveAndEnabled)
+            {
+                _layerFadeOutCoroutines[layer] = StartCoroutine(FadeOutLayerRoutine(layer, 0.2f));
+            }
         }
 
         if (req.LockLayer) _lockedLayers.Remove(layer);
