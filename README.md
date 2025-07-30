@@ -36,6 +36,8 @@ _animCtrl.Queue("HitReact", returnToPrevious: true); // Returns to Run after
 | `InterruptLayer()` | Stop layer and clear queue | `layer, fadeOutDuration=0.2f, force=false` |
 | `IsLayerLocked()` | Check if layer is locked | `layer` |
 | `SetFloat/Bool/Int/Trigger()` | Cached parameter setters | `param, value` |
+| `IsAnyLayerPlaying()` | Check if any layer is playing | `layer` |
+| `IsLayerPlaying()` | Check if layer is playing | `layer` |
 
 ## 📦 Installation
 
