@@ -8,7 +8,6 @@ using UnityEngine;
 /// chaining, interrupts, return‐to‐previous, and completion callbacks per‐layer.
 /// Also provides high‐performance, cached parameter APIs for driving Blend Trees,
 /// and supports "locking" layers to prevent interruptions until the current animation completes.
-/// This production‐ready version is optimized for performance, memory, and robustness.
 /// </summary>
 [RequireComponent(typeof(Animator))]
 public class AnimationController : MonoBehaviour
@@ -391,3 +390,4 @@ public class AnimationController : MonoBehaviour
         return h;
     }
 }
+
