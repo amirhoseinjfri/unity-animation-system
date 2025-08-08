@@ -18,14 +18,19 @@ public class AnimationController : MonoBehaviour
     [Tooltip("Default fade duration used when queuing a new looping animation that might be returned to later.")]
     [SerializeField] private float defaultLoopFadeInDuration = 0.2f;
 
-    private static readonly Dictionary<string, int> StateHashCache = new Dictionary<string, int>(StringComparer.Ordinal);
-    private static readonly Dictionary<string, int> ParamHashCache = new Dictionary<string, int>(StringComparer.Ordinal);
+    [Tooltip("Default fade-in duration for layer weights.")]
+    [SerializeField] private float defaultLayerFadeInDuration = 0.1f;
 
-    private readonly Dictionary<int, LinkedList<AnimationRequest>> _layerQueues = new Dictionary<int, LinkedList<AnimationRequest>>();
-    private readonly Dictionary<int, Coroutine> _layerPlaybackCoroutines = new Dictionary<int, Coroutine>();
-    private readonly Dictionary<int, Coroutine> _layerFadeOutCoroutines = new Dictionary<int, Coroutine>();
-    private readonly Dictionary<int, AnimationRequest> _lastLoopedStateByLayer = new Dictionary<int, AnimationRequest>();
-    private readonly HashSet<int> _lockedLayers = new HashSet<int>();
+    private static readonly Dictionary<string, int> StateHashCache = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> ParamHashCache = new(StringComparer.Ordinal);
+
+    private readonly Dictionary<int, LinkedList<AnimationRequest>> _layerQueues = new();
+    private readonly Dictionary<int, Coroutine> _layerPlaybackCoroutines = new();
+    private readonly Dictionary<int, Coroutine> _layerFadeOutCoroutines = new();
+    private readonly Dictionary<int, AnimationRequest> _lastLoopedStateByLayer = new();
+    private readonly HashSet<int> _lockedLayers = new();
+
+    private AnimatorClipInfo[] _clipInfoBuffer = new AnimatorClipInfo[1];
 
     private class AnimationRequest
     {
@@ -45,14 +50,10 @@ public class AnimationController : MonoBehaviour
 
     private void OnDisable()
     {
-        foreach (var coroutine in _layerPlaybackCoroutines.Values)
-        {
-            if (coroutine != null) StopCoroutine(coroutine);
-        }
-        foreach (var coroutine in _layerFadeOutCoroutines.Values)
-        {
-            if (coroutine != null) StopCoroutine(coroutine);
-        }
+        foreach (var kv in _layerPlaybackCoroutines)
+            if (kv.Value != null) StopCoroutine(kv.Value);
+        foreach (var kv in _layerFadeOutCoroutines)
+            if (kv.Value != null) StopCoroutine(kv.Value);
 
         _layerPlaybackCoroutines.Clear();
         _layerFadeOutCoroutines.Clear();
@@ -64,80 +65,63 @@ public class AnimationController : MonoBehaviour
 #if UNITY_EDITOR
     private void OnDestroy()
     {
-        // Clear static caches when the object is destroyed in the editor to prevent stale data.
         StateHashCache.Clear();
         ParamHashCache.Clear();
     }
 #endif
 
-    /// <summary>Is the given layer currently locked?</summary>
     public bool IsLayerLocked(int layer) => _lockedLayers.Contains(layer);
+    public bool IsAnyLayerPlaying => _layerPlaybackCoroutines.Count > 0;
+    public bool IsLayerPlaying(int layer) => _layerPlaybackCoroutines.ContainsKey(layer);
 
-    /// <summary>
-    /// Plays an animation immediately, interrupting any non‐locked animations on the same layer.
-    /// </summary>
     public void Play(string stateName, int layer = 0, float fadeDuration = 0.1f,
-                     bool loop = false, bool returnToPrevious = false,
-                     bool lockLayer = false, Action onComplete = null)
+                         bool loop = false, bool returnToPrevious = false,
+                         bool lockLayer = false, Action onComplete = null)
     {
-        if (!IsValidLayer(layer)) return;
-        if (!IsValidForExecution()) return;
+        if (!IsValidLayer(layer) || !IsValidForExecution()) return;
+        if (IsLayerLocked(layer)) return;
 
-        if (IsLayerLocked(layer))
-            return;
-
-        StopAndRemoveCoroutine(_layerPlaybackCoroutines, layer);
+        StopLayerCoroutine(_layerPlaybackCoroutines, layer);
         GetOrCreateQueue(layer).Clear();
         Queue(stateName, layer, fadeDuration, loop, returnToPrevious, lockLayer, onComplete);
     }
 
-    /// <summary>Queues an animation to run after the current one finishes on that layer.</summary>
     public void Queue(string stateName, int layer = 0, float fadeDuration = 0.1f,
-                      bool loop = false, bool returnToPrevious = false,
-                      bool lockLayer = false, Action onComplete = null)
+                         bool loop = false, bool returnToPrevious = false,
+                         bool lockLayer = false, Action onComplete = null)
     {
-        if (!IsValidLayer(layer)) return;
-        if (!IsValidForExecution()) return;
+        if (!IsValidLayer(layer) || !IsValidForExecution()) return;
 
         var request = CreateRequest(stateName, fadeDuration, loop, returnToPrevious, lockLayer, onComplete);
 
         if (loop)
+        {
             _lastLoopedStateByLayer[layer] = CreateRequest(stateName, defaultLoopFadeInDuration, true, false, false, null);
+        }
 
         GetOrCreateQueue(layer).AddLast(request);
         StartNext(layer);
     }
 
-    /// <summary>
-    /// Interrupts the specified layer (unless locked, or if force=true), clears its queue,
-    /// and optionally fades out its weight.
-    /// </summary>
     public void InterruptLayer(int layer, float fadeOutDuration = 0.2f, bool force = false)
     {
-        if (!IsValidLayer(layer)) return;
-        if (!IsValidForExecution()) return;
-
+        if (!IsValidLayer(layer) || !IsValidForExecution()) return;
         if (_lockedLayers.Contains(layer) && !force) return;
         if (force) _lockedLayers.Remove(layer);
 
-        StopAndRemoveCoroutine(_layerPlaybackCoroutines, layer);
-        StopAndRemoveCoroutine(_layerFadeOutCoroutines, layer);
+        StopLayerCoroutine(_layerPlaybackCoroutines, layer);
+        StopLayerCoroutine(_layerFadeOutCoroutines, layer);
 
         if (_layerQueues.TryGetValue(layer, out var queue))
-        {
             queue.Clear();
-        }
+
         _lastLoopedStateByLayer.Remove(layer);
 
         if (fadeOutDuration > 0 && _animator.GetLayerWeight(layer) > 0)
             _layerFadeOutCoroutines[layer] = StartCoroutine(FadeOutLayerRoutine(layer, fadeOutDuration));
-        else if (fadeOutDuration <= 0)
+        else
             SetLayerWeightSafe(layer, 0f);
     }
-
-    public bool IsAnyLayerPlaying => _layerPlaybackCoroutines.Count > 0;
-
-    public bool IsLayerPlaying(int layer) => _layerPlaybackCoroutines.ContainsKey(layer);
 
     public void SetFloat(string param, float value)
     {
@@ -165,8 +149,7 @@ public class AnimationController : MonoBehaviour
 
     private void StartNext(int layer)
     {
-        if (!IsValidForExecution()) return;
-        if (_layerPlaybackCoroutines.ContainsKey(layer)) return;
+        if (!IsValidForExecution() || _layerPlaybackCoroutines.ContainsKey(layer)) return;
 
         var queue = GetOrCreateQueue(layer);
         if (queue.Count == 0) return;
@@ -182,18 +165,17 @@ public class AnimationController : MonoBehaviour
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         if (!_animator.HasState(layer, req.StateHash))
         {
-            Debug.LogError($"State '{req.StateName}' not found on layer {layer}. Please check spelling and Animator Controller setup.", this);
-            if (req.LockLayer) _lockedLayers.Remove(layer);
+            Debug.LogError($"State '{req.StateName}' not found on layer {layer}.", this);
+            _lockedLayers.Remove(layer);
             _layerPlaybackCoroutines.Remove(layer);
             StartNext(layer);
             yield break;
         }
 #endif
-
         if (req.LockLayer) _lockedLayers.Add(layer);
-        StopAndRemoveCoroutine(_layerFadeOutCoroutines, layer);
+        StopLayerCoroutine(_layerFadeOutCoroutines, layer);
 
-        SetLayerWeightSafe(layer, 1f);
+        yield return FadeInLayerRoutine(layer, defaultLayerFadeInDuration);
         CrossFadeSafe(req.StateHash, req.FadeDuration, layer);
 
         if (req.FadeDuration > 0)
@@ -201,7 +183,7 @@ public class AnimationController : MonoBehaviour
 
         if (!IsValidForExecution())
         {
-            if (req.LockLayer) _lockedLayers.Remove(layer);
+            _lockedLayers.Remove(layer);
             yield break;
         }
 
@@ -218,8 +200,7 @@ public class AnimationController : MonoBehaviour
 
         if (clipLength <= 0f)
         {
-            Debug.LogWarning($"Could not determine clip length for '{req.StateName}' on layer {layer}. Treating as looping state.", this);
-            if (req.LockLayer) _lockedLayers.Remove(layer);
+            _lockedLayers.Remove(layer);
             _layerPlaybackCoroutines.Remove(layer);
             StartNext(layer);
             yield break;
@@ -230,13 +211,14 @@ public class AnimationController : MonoBehaviour
         {
             if (!IsValidForExecution())
             {
-                if (req.LockLayer) _lockedLayers.Remove(layer);
+                _lockedLayers.Remove(layer);
                 yield break;
             }
 
-            if (!_animator.IsInTransition(layer) && _animator.GetCurrentAnimatorStateInfo(layer).shortNameHash != req.StateHash)
+            if (!_animator.IsInTransition(layer) &&
+                _animator.GetCurrentAnimatorStateInfo(layer).shortNameHash != req.StateHash)
             {
-                if (req.LockLayer) _lockedLayers.Remove(layer);
+                _lockedLayers.Remove(layer);
                 _layerPlaybackCoroutines.Remove(layer);
                 StartNext(layer);
                 yield break;
@@ -253,11 +235,10 @@ public class AnimationController : MonoBehaviour
         }
         else if (GetOrCreateQueue(layer).Count == 0)
         {
-            if (IsValidForExecution())
-                _layerFadeOutCoroutines[layer] = StartCoroutine(FadeOutLayerRoutine(layer, 0.2f));
+            _layerFadeOutCoroutines[layer] = StartCoroutine(FadeOutLayerRoutine(layer, 0.2f));
         }
 
-        if (req.LockLayer) _lockedLayers.Remove(layer);
+        _lockedLayers.Remove(layer);
         _layerPlaybackCoroutines.Remove(layer);
         StartNext(layer);
     }
@@ -280,10 +261,10 @@ public class AnimationController : MonoBehaviour
             var info = _animator.GetCurrentAnimatorStateInfo(layer);
             if (!_animator.IsInTransition(layer) && info.shortNameHash == targetStateHash)
             {
-                var clips = _animator.GetCurrentAnimatorClipInfo(layer);
-                if (clips.Length > 0)
+                var clips = _animator.GetCurrentAnimatorClipInfo(layer, _clipInfoBuffer);
+                if (clips > 0)
                 {
-                    callback(clips[0].clip.length);
+                    callback(_clipInfoBuffer[0].clip.length);
                     yield break;
                 }
             }
@@ -321,13 +302,30 @@ public class AnimationController : MonoBehaviour
         _layerFadeOutCoroutines.Remove(layer);
     }
 
+    private IEnumerator FadeInLayerRoutine(int layer, float duration)
+    {
+        float start = _animator.GetLayerWeight(layer);
+        float t = 0f;
+
+        while (t < duration)
+        {
+            if (!IsValidForExecution()) yield break;
+
+            t += Time.deltaTime;
+            SetLayerWeightSafe(layer, Mathf.Lerp(start, 1f, t / duration));
+            yield return null;
+        }
+
+        SetLayerWeightSafe(layer, 1f);
+    }
+
     private bool IsValidForExecution() => isActiveAndEnabled && _animator != null && _animator.enabled;
 
     private bool IsValidLayer(int layer)
     {
         if (layer < 0 || _animator == null || layer >= _animator.layerCount)
         {
-            Debug.LogWarning($"Invalid layer index {layer}. Aborting request.", this);
+            Debug.LogWarning($"Invalid layer index {layer}.", this);
             return false;
         }
         return true;
@@ -345,24 +343,19 @@ public class AnimationController : MonoBehaviour
             _animator.CrossFadeInFixedTime(stateHash, fadeDuration, layer, 0f);
     }
 
-    private void StopAndRemoveCoroutine(Dictionary<int, Coroutine> coroutineDict, int key)
+    private void StopLayerCoroutine(Dictionary<int, Coroutine> dict, int layer)
     {
-        if (coroutineDict.TryGetValue(key, out var coro))
+        if (dict.TryGetValue(layer, out var coro))
         {
-            if (coro != null)
-            {
-                StopCoroutine(coro);
-            }
-            coroutineDict.Remove(key);
+            if (coro != null) StopCoroutine(coro);
+            dict.Remove(layer);
         }
     }
 
     private LinkedList<AnimationRequest> GetOrCreateQueue(int layer)
     {
         if (!_layerQueues.TryGetValue(layer, out var queue))
-        {
             _layerQueues[layer] = queue = new LinkedList<AnimationRequest>();
-        }
         return queue;
     }
 
